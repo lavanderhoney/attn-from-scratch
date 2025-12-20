@@ -43,8 +43,7 @@ def get_tokenizer(lang, batch_size:int = 100000, vocab_size:int = 32000, tokeniz
 
 class BilingualDataset(Dataset):
     """
-    The dataset returns (seq_len) tensor token_ids of both the languages for the given corpus.
-    It also handles the padding.
+    Returns variable-length token IDs only.
     """
     def __init__(self, dataset, seq_len:int, src_tokenizer: Tokenizer, tgt_tokenizer: Tokenizer, src_lang="en", tgt_lang="fr"):
         super().__init__()
@@ -55,41 +54,58 @@ class BilingualDataset(Dataset):
         self.src_lang = src_lang
         self.tgt_lang = tgt_lang
         
+        self.sos_id = src_tokenizer.token_to_id("[SOS]")
+        self.eos_id = src_tokenizer.token_to_id("[EOS]")
+        
     def __len__(self):
         return len(self.dataset)
-    
-    def pad_sequence(self, tokenizer, enc):
-        # src input is padded with SOS, and EOS.
-        # In the output, our sentence tokens will have size seq_len-2.
-        if len(enc) < self.seq_len-2:
-           padded_tensor = torch.tensor([
-               tokenizer.token_to_id("[SOS]"),
-               *enc,
-               *[tokenizer.token_to_id("[PAD]") for _ in range((self.seq_len - 2) - len(enc))],
-               tokenizer.token_to_id("[EOS]")
-           ])
-        else:
-            padded_tensor = torch.tensor([
-                tokenizer.token_to_id("[SOS]"),
-                enc[:self.seq_len-2],
-                tokenizer.token_to_id("[EOS]")
-            ])
-        return padded_tensor
+
     def __getitem__(self, index):
         ex = self.dataset[index]["translation"]
-        src_enc = self.src_tokenizer.encode(ex[self.src_lang]).ids
-        tgt_enc = self.tgt_tokenizer.encode(ex[self.tgt_lang]).ids
+        src_ids = self.src_tokenizer.encode(ex[self.src_lang]).ids
+        tgt_ids = self.tgt_tokenizer.encode(ex[self.tgt_lang]).ids
     
-        src_tensor = self.pad_sequence(self.src_tokenizer, src_enc)
-        tgt_tensor = self.pad_sequence(self.tgt_tokenizer, tgt_enc)
-        return (src_tensor, tgt_tensor)   
-       
+        src_ids = [self.sos_id] + src_ids + [self.eos_id]
+        tgt_ids = [self.sos_id] + tgt_ids + [self.eos_id]
+        return {
+            "src_ids" : torch.tensor(src_ids, dtype=torch.long), # NOTE: nn.Embedding expects the input seq to have Long or Int64 dtype, NOT float
+            "tgt_ids" : torch.tensor(tgt_ids, dtype=torch.long)
+        }
+    
+def collate_fn(batch, pad_id, seq_len):
+    B = len(batch)
+    
+    # Pre-allocate memory for the collated batch. Helps with memory efficiency and performance
+    src_batch = torch.full((B, seq_len), pad_id)
+    tgt_batch = torch.full((B, seq_len), pad_id)
+    
+    for i, item in enumerate(batch):
+        src = item["src_ids"]
+        tgt = item["tgt_ids"]
+        
+        src_len = min(len(src), seq_len)
+        tgt_len = min(len(tgt), seq_len)
+        
+        # 3. Assign directly (No need to wrap in torch.tensor() again)
+        # This copies the data into the pre-allocated batch tensor
+        src_batch[i, :src_len] = src[:src_len]
+        tgt_batch[i, :tgt_len] = tgt[:tgt_len]
+        
+        # NOTE: we abruptly truncate a longer sequence, i.e, it won't end with EOS.
+        # forcing a longer sentence to end with EOS will teach false grammer to the transformer, and it will hallucinate more.
+    
+    return {
+        "src_ids" : src_batch,
+        "tgt_ids" : tgt_batch
+    }
+    
 en_tokenizer = get_tokenizer("en")
 fr_tokenizer = get_tokenizer("fr")
 splits = dataset.train_test_split(test_size=0.1, seed=42)
 train_ds = BilingualDataset(splits["train"], en_tokenizer, fr_tokenizer)
 val_ds   = BilingualDataset(splits["test"],  en_tokenizer, fr_tokenizer)
 
-
-train_dl = DataLoader(train_ds, batch_size=32)
-val_dl = DataLoader(val_ds, batch_size=32)
+SEQ_LEN = 1000
+BATCH_SIZE = 32
+train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, collate_fn=lambda b: collate_fn(b, en_tokenizer.token_to_id("[PAD]"), SEQ_LEN))
+val_dl = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=True, collate_fn=lambda b: collate_fn(b, en_tokenizer.token_to_id("[PAD]"), SEQ_LEN))
