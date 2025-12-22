@@ -19,7 +19,7 @@ def get_training_corpus(lang:str, batch_size):
         
             
 # train a BPE for en and fr separately
-def get_tokenizer(lang, batch_size:int = 100000, vocab_size:int = 32000, tokenizer_path=None ) -> Tokenizer:
+def get_tokenizer(lang, batch_size:int = 100_000, vocab_size:int = 32_000, tokenizer_path=None ) -> Tokenizer:
     if tokenizer_path:
         return Tokenizer.from_file(tokenizer_path)
 
@@ -98,14 +98,18 @@ def collate_fn(batch, pad_id, seq_len):
         "src_ids" : src_batch,
         "tgt_ids" : tgt_batch
     }
-    
-en_tokenizer = get_tokenizer("en")
-fr_tokenizer = get_tokenizer("fr")
-splits = dataset.train_test_split(test_size=0.1, seed=42)
-train_ds = BilingualDataset(splits["train"], en_tokenizer, fr_tokenizer)
-val_ds   = BilingualDataset(splits["test"],  en_tokenizer, fr_tokenizer)
 
-SEQ_LEN = 1000
-BATCH_SIZE = 32
-train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, collate_fn=lambda b: collate_fn(b, en_tokenizer.token_to_id("[PAD]"), SEQ_LEN))
-val_dl = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=True, collate_fn=lambda b: collate_fn(b, en_tokenizer.token_to_id("[PAD]"), SEQ_LEN))
+def get_dataloaders(seq_len, batch_size, vocab_size, tokenizer_path, test_size):
+    
+    en_tokenizer = get_tokenizer("en", vocab_size=vocab_size, tokenizer_path=tokenizer_path)
+    fr_tokenizer = get_tokenizer("fr", vocab_size=vocab_size, tokenizer_path=tokenizer_path)
+    
+    splits = dataset.train_test_split(test_size=test_size, seed=42)
+    
+    train_ds = BilingualDataset(splits["train"], en_tokenizer, fr_tokenizer)
+    val_ds   = BilingualDataset(splits["test"],  en_tokenizer, fr_tokenizer)
+
+    train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=lambda b: collate_fn(b, en_tokenizer.token_to_id("[PAD]"), seq_len))
+    val_dl = DataLoader(val_ds, batch_size=batch_size, shuffle=True, collate_fn=lambda b: collate_fn(b, en_tokenizer.token_to_id("[PAD]"), seq_len))
+    
+    return train_dl, val_dl, en_tokenizer, fr_tokenizer
