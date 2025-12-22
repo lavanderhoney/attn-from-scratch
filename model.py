@@ -253,28 +253,52 @@ class Transformer(nn.Module):
         self.projection_layer = nn.Linear(d_model, tgt_vocab_size)
         self._init_parameters()
     
-    def forward(self, src: torch.Tensor, tgt:torch.Tensor,
-                src_mask:torch.Tensor, tgt_mask: torch.Tensor):
-        """
-        Args:
-            src: Source sequence (Batch, Src_Seq_Len)
-            tgt: Target sequence (Batch, Tgt_Seq_Len)
-            src_mask: Mask for Encoder (Batch, 1, 1, Src_Seq_Len)
-            tgt_mask: Mask for Decoder Self-Attention (Batch, 1, Tgt_Seq, Tgt_Seq)
-        """
-        # 1. Encode the src sequence
-        encoder_output = self.encoder(src, src_mask)
-        
-        # 2. Decode the target using src encoding
-        decoder_output = self.decoder(tgt, encoder_output, src_mask, tgt_mask)
-        
-        x = self.projection_layer(decoder_output)
-        return F.log_softmax(x, dim=-1) # output probabilities
-    
+    def forward(self, src, tgt):
+        # 1. Create Masks
+        # (B, 1, 1, SrcLen) - Expanded for heads
+        src_mask = self.make_src_pad_mask(src, self.pad_id).unsqueeze(1).unsqueeze(2) 
+
+        # (B, 1, TgtLen, TgtLen) - Expanded for heads
+        tgt_mask = self.make_decoder_mask(tgt, self.pad_id).unsqueeze(1)
+
+        # 2. Encoder
+        # Uses src_mask to ignore pads in self-attention
+        memory = self.encoder(src, mask=src_mask)
+
+        # 3. Decoder
+        # tgt_mask: Used in Self-Attention (Mask Future + Pads)
+        # src_mask: Used in Cross-Attention (Mask Encoder Pads)
+        out = self.decoder(tgt, memory, tgt_mask=tgt_mask, src_mask=src_mask)
+        out = self.projection_layer(out)
+        return out # don't return probabilities, CE loss is being used
+   
     def _init_parameters(self):
         for p in self.parameters():
             if p.dim() > 1 :
                 nn.init.xavier_uniform_(p)
+                
+    # masking
+    def make_src_pad_mask(self, src_ids, pad_id):
+        # src_ids = (B, seq_len)
+        return (src_ids == pad_id)
+    
+    def make_tgt_pad_mask(self, tgt_ids, pad_id):
+        return (tgt_ids == pad_id)   # (B, T)
+
+    def make_causal_mask(self, size, device):
+        return torch.triu(
+            torch.ones(size, size, dtype=torch.bool, device=device),
+            diagonal=1
+        )
+    def make_decoder_mask(self, tgt_ids, pad_id):
+        B, T = tgt_ids.shape
+
+        pad_mask = self.make_tgt_pad_mask(tgt_ids, pad_id)     # (B, T)
+        causal = self.make_causal_mask(T, tgt_ids.device)      # (T, T)
+
+        # broadcast to (B, T, T)
+        return pad_mask.unsqueeze(1) | causal
+
 # class Encoder(nn.Module):
 #     def __init__(self, N: int = 6, d_model: int = 512, n_heads: int = 8, droput: float = 0.1):
 #         self.N = N
