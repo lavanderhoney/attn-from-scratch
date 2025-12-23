@@ -22,7 +22,7 @@ class Embeddings(nn.Module):
         return self.embedding(x) * np.sqrt(self.d_model) # will this work? i.e broadcasting?
 
 class PositionalEncoding(nn.Module):
-    def __init__(self,seq_len: int, d_model:int = 512 ) -> None:
+    def __init__(self, seq_len: int, d_model:int = 512 ) -> None:
         """
         Args:
             seq_len: the maximum sequence length the model can handle
@@ -63,8 +63,8 @@ class PositionalEncoding(nn.Module):
         Returns:
             Embeddings with positional information added.
         """
-        # slice the pe only upto the sequence length of x
-        return x + self.pe[:, :x.size(1)+1, :]
+        # slice the pe only upto the sequence length of x (teacher forcing in decoder)
+        return x + self.pe[:, :x.size(1), :]
 
 class MultiHeadAttention(nn.Module):
     def __init__(self, d_model: int = 512, n_heads: int = 8, dropout: float = 0.1):
@@ -227,7 +227,7 @@ class Decoder(nn.Module):
         self.norm = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
         
-    def forward(self, x, encoder_output, src_mask, target_mask):
+    def forward(self, x, encoder_output, src_mask, tgt_mask):
         """
         Args:
             x: Decoder inputs (Target IDs)
@@ -239,15 +239,16 @@ class Decoder(nn.Module):
         x = self.pos_embeddings(x)
         x = self.dropout(x)
         for decoder_block in self.decoder_blocks:
-            x = decoder_block(x, encoder_output, src_mask, target_mask)
+            x = decoder_block(x, encoder_output, src_mask, tgt_mask)
         return self.norm(x)
     
 class Transformer(nn.Module):
-    def __init__(self, src_vocab_size: int, tgt_vocab_size:int, src_seq_len:int, tgt_seq_len: int,  N: int = 6, 
+    def __init__(self, src_vocab_size: int, tgt_vocab_size:int, src_seq_len:int, tgt_seq_len: int,  pad_id:int, N: int = 6, 
                  d_model: int = 512, d_ff:int = 2048, n_heads: int = 8, dropout: float = 0.1):
         super().__init__()
         self.src_seq_len = src_seq_len
         self.tgt_seq_len = tgt_seq_len
+        self.pad_id = pad_id
         self.encoder = Encoder(src_vocab_size, src_seq_len, N, d_model, d_ff, n_heads, dropout)
         self.decoder = Decoder(tgt_vocab_size, tgt_seq_len, N, d_model, d_ff, n_heads, dropout)
         self.projection_layer = nn.Linear(d_model, tgt_vocab_size)
@@ -263,12 +264,12 @@ class Transformer(nn.Module):
 
         # 2. Encoder
         # Uses src_mask to ignore pads in self-attention
-        memory = self.encoder(src, mask=src_mask)
+        memory = self.encoder(src, src_mask=src_mask)
 
         # 3. Decoder
         # tgt_mask: Used in Self-Attention (Mask Future + Pads)
         # src_mask: Used in Cross-Attention (Mask Encoder Pads)
-        out = self.decoder(tgt, memory, tgt_mask=tgt_mask, src_mask=src_mask)
+        out = self.decoder(tgt, memory, src_mask=src_mask, tgt_mask=tgt_mask,)
         out = self.projection_layer(out)
         return out # don't return probabilities, CE loss is being used
    

@@ -1,3 +1,5 @@
+#%%
+import os
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, random_split
@@ -13,14 +15,15 @@ from tokenizers import (
 )
 dataset = load_dataset("Helsinki-NLP/opus_books", "en-fr", split="train")
 
-def get_training_corpus(lang:str, batch_size):
-    for i in range(0, len(dataset), batch_size):
-        yield dataset[i : i + batch_size]["translation"][lang] # yield a sentence of specified language
+def get_training_corpus(lang:str):
+    for item in dataset:
+        yield item["translation"][lang] # yield a sentence of specified language
         
             
 # train a BPE for en and fr separately
-def get_tokenizer(lang, batch_size:int = 100_000, vocab_size:int = 32_000, tokenizer_path=None ) -> Tokenizer:
+def get_tokenizer(lang, vocab_size:int = 32_000, tokenizer_path=None ) -> Tokenizer:
     if tokenizer_path:
+        print("Loading tokenizer from: ", tokenizer_path)
         return Tokenizer.from_file(tokenizer_path)
 
     tokenizer = Tokenizer(models.BPE(unk_token="[UNK]"))
@@ -31,12 +34,14 @@ def get_tokenizer(lang, batch_size:int = 100_000, vocab_size:int = 32_000, token
     
     special_tokens = ["[UNK]", "[PAD]", "[SOS]", "[EOS]"]
     trainer = trainers.BpeTrainer(vocab_size=vocab_size, special_tokens=special_tokens, min_frequency=2)
-    tokenizer.train_from_iterator(get_training_corpus(lang, batch_size), trainer=trainer)
+    tokenizer.train_from_iterator(get_training_corpus(lang), trainer=trainer)
     
     tokenizer.post_processor = processors.ByteLevel(trim_offsets=False)
     tokenizer.decoder = decoders.ByteLevel()
     
-    saved_path =f"bpe_tokenizer_opus_{lang}.json"
+    if not os.path.exists("tokenizers/"):
+        os.makedirs("tokenizers/")
+    saved_path =f"tokenizers/bpe_tokenizer_opus_{lang}.json"
     tokenizer.save(saved_path)
     print("tokenizer saved to: " ,saved_path)
     return tokenizer
@@ -99,17 +104,37 @@ def collate_fn(batch, pad_id, seq_len):
         "tgt_ids" : tgt_batch
     }
 
-def get_dataloaders(seq_len, batch_size, vocab_size, tokenizer_path, test_size):
+def get_dataloaders(seq_len, batch_size, vocab_size, src_tokenizer_path, tgt_tokenizer_path, test_size):
     
-    en_tokenizer = get_tokenizer("en", vocab_size=vocab_size, tokenizer_path=tokenizer_path)
-    fr_tokenizer = get_tokenizer("fr", vocab_size=vocab_size, tokenizer_path=tokenizer_path)
+    en_tokenizer = get_tokenizer("en", vocab_size=vocab_size, tokenizer_path=src_tokenizer_path)
+    fr_tokenizer = get_tokenizer("fr", vocab_size=vocab_size, tokenizer_path=tgt_tokenizer_path)
     
     splits = dataset.train_test_split(test_size=test_size, seed=42)
     
-    train_ds = BilingualDataset(splits["train"], en_tokenizer, fr_tokenizer)
-    val_ds   = BilingualDataset(splits["test"],  en_tokenizer, fr_tokenizer)
+    train_ds = BilingualDataset(splits["train"], seq_len, en_tokenizer, fr_tokenizer)
+    val_ds   = BilingualDataset(splits["test"],  seq_len, en_tokenizer, fr_tokenizer)
 
+    print(f"Train size: {len(train_ds)}, Val size: {len(val_ds)}")
     train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=lambda b: collate_fn(b, en_tokenizer.token_to_id("[PAD]"), seq_len))
     val_dl = DataLoader(val_ds, batch_size=batch_size, shuffle=True, collate_fn=lambda b: collate_fn(b, en_tokenizer.token_to_id("[PAD]"), seq_len))
     
     return train_dl, val_dl, en_tokenizer, fr_tokenizer
+
+#%%
+if __name__ == "__main__":
+    train_dl, val_dl, en_tokenizer, fr_tokenizer = get_dataloaders(
+        seq_len=32, 
+        batch_size=16, 
+        vocab_size=32_000, 
+        src_tokenizer_path="tokenizers/bpe_tokenizer_opus_en.json", 
+        tgt_tokenizer_path="tokenizers/bpe_tokenizer_opus_fr.json",
+        test_size=0.1
+    )
+    
+    for batch in train_dl:
+        print(batch["src_ids"].shape)  # should be (batch_size, seq_len)
+        print(batch["tgt_ids"].shape)  # should be (batch_size, seq_len)
+        print(batch["src_ids"][0])    # print first sample's src_ids
+        print(batch["tgt_ids"][0])    # print first sample's tgt_ids
+        break
+#%%

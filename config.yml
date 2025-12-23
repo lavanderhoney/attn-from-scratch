@@ -1,7 +1,7 @@
 # Training Configuration
 training:
-  n_epochs: 10
-  batch_size: 32
+  n_epochs: 1
+  batch_size: 16
   lr: 1e-3
   warmup: 4000
 
@@ -11,10 +11,11 @@ model:
   d_model: 512
   d_ff: 2048  # 4 * d_model
   num_heads: 8
-  vocab_size: 10000
+  vocab_size: 32000
   num_layers: 6
 
 # Data
 data:
   test_size: 0.1
-  tokenizer_path: null
+  src_tokenizer_path: tokenizers/bpe_tokenizer_opus_en.json
+  tgt_tokenizer_path: tokenizers/bpe_tokenizer_opus_fr.json
