@@ -116,7 +116,7 @@ class MultiHeadAttention(nn.Module):
         V = self.w_v(v)
         
         # Split into heads
-        # view() converts from (batch, seq_len, d_k) -> (batch, seq_len, n_heads, d_k)
+        # view() converts from (batch, seq_len, d_model) -> (batch, seq_len, n_heads, d_k)
         # then we transpose to keep batch and n_heads together as "batch dimension", and the mat-mul happens in the last two dim only
         Q = Q.view(batch_size, -1, self.n_heads, self.d_k).transpose(1, 2)
         K = K.view(batch_size, -1, self.n_heads, self.d_k).transpose(1, 2)
@@ -282,10 +282,8 @@ class Transformer(nn.Module):
     def make_src_pad_mask(self, src_ids, pad_id):
         # src_ids = (B, seq_len)
         return (src_ids == pad_id)
-    
     def make_tgt_pad_mask(self, tgt_ids, pad_id):
         return (tgt_ids == pad_id)   # (B, T)
-
     def make_causal_mask(self, size, device):
         return torch.triu(
             torch.ones(size, size, dtype=torch.bool, device=device),
@@ -299,6 +297,81 @@ class Transformer(nn.Module):
 
         # broadcast to (B, T, T)
         return pad_mask.unsqueeze(1) | causal
+    
+    def greedy_decode(self, src: torch.Tensor, sos_id: int, eos_id: int) -> torch.Tensor:
+        batch = src.size(0)
+        device = src.device
+        
+        src_mask = self.make_src_pad_mask(src, self.pad_id).unsqueeze(1).unsqueeze(2)         
+        memory = self.encoder(src, src_mask=src_mask) # (batch, seq_len, d_model)
+        
+        # start with just the SOS token
+        decoder_input = torch.full((batch, 1), sos_id, dtype=torch.long, device=device)
+        # decoder_input = torch.full((batch, self.tgt_seq_len), self.pad_id, dtype=torch.long, device=device)
+        # decoder_input[:, 0] = sos_id
+        
+        # Track which sequences have finished
+        finished = torch.zeros(batch, dtype=torch.bool, device=device)
+        # for i in range(1, self.tgt_seq_len):
+        for _ in range(self.tgt_seq_len - 1):
+            tgt_mask = self.make_decoder_mask(decoder_input, self.pad_id).unsqueeze(1)
+            
+            out = self.decoder(decoder_input, memory, src_mask=src_mask, tgt_mask=tgt_mask)
+            # we only care about the logits of the last output
+            probab = F.softmax(out[:, -1, :], dim=-1)
+            next_tokens = probab.argmax(dim=-1)
+            
+            # out =  F.softmax(
+            #     self.decoder(decoder_input, memory, src_mask=src_mask, tgt_mask=tgt_mask),
+            #     dim=-1) # (batch, tgt_seq_len, vocab_size)
+            
+            # Take prediction for *current* position
+            # next_tokens = out[:, i-1, :].argmax(dim=-1) # (batch, )
+            
+            # Do not overwrite tokens after EOS. For postn finished is true, it will take a PAD id, otherwise next_token id 
+            next_tokens = torch.where(
+                finished,
+                torch.full_like(next_tokens, self.pad_id),
+                next_tokens
+            )
+            
+            # Concatenate the new token
+            decoder_input = torch.cat([decoder_input, next_tokens.unsqueeze(1)], dim=1)
+            # decoder_input[:, i] = next_tokens
+            
+            # update finished mask
+            finished |= (next_tokens == eos_id)
+            
+            if finished.all():
+                break
+        return decoder_input
+    
+    # def greedy_decode(self, src: torch.Tensor, sos_id: int, eos_id: int) -> torch.Tensor:
+    #     src_mask = self.make_src_pad_mask(src, self.pad_id).unsqueeze(1).unsqueeze(2) 
+    #     memory = self.encoder(src, src_mask=src_mask) # (batch, seq_len, d_model)
+        
+    #     batch, seq_len = src.shape
+    #     decoder_input = torch.full((batch, self.tgt_seq_len), self.pad_id)
+    #     decoder_input[:, 0] = sos_id
+        
+    #     eos_tensor = torch.full((1, self.tgt_seq_len), eos_id)
+        
+    #     # model would be called at max seq_len times for each input
+    #     for i in range(1, self.tgt_seq_len):
+    #         tgt_mask = self.make_decoder_mask(decoder_input, self.pad_id)
+            
+    #         out =  F.softmax(
+    #                 self.decoder(decoder_input, memory, src_mask=src_mask, tgt_mask=tgt_mask),
+    #                 dim=-1) # (batch, tgt_seq_len, vocab_size)
+            
+    #         next_tokens = out[:, i, :].argmax(dim=-1) # (batch, )
+    #         decoder_input[:, i] = next_tokens
+            
+    #         # check for EOS in each batch
+    #         mask = (decoder_input == eos_tensor)
+    #         decoder_input = decoder_input[mask]
+        
+    #     return decoder_input
 
 # class Encoder(nn.Module):
 #     def __init__(self, N: int = 6, d_model: int = 512, n_heads: int = 8, droput: float = 0.1):
