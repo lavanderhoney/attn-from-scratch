@@ -23,7 +23,7 @@ def get_training_corpus(lang:str):
 # train a BPE for en and fr separately
 def get_tokenizer(lang, vocab_size:int = 32_000, tokenizer_path=None ) -> Tokenizer:
     if tokenizer_path:
-        print("Loading tokenizer from: ", tokenizer_path)
+        # print("Loading tokenizer from: ", tokenizer_path)
         return Tokenizer.from_file(tokenizer_path)
 
     tokenizer = Tokenizer(models.BPE(unk_token="[UNK]"))
@@ -114,7 +114,7 @@ def get_dataloaders(seq_len, batch_size, vocab_size, src_tokenizer_path, tgt_tok
     train_ds = BilingualDataset(splits["train"], seq_len, en_tokenizer, fr_tokenizer)
     val_ds   = BilingualDataset(splits["test"],  seq_len, en_tokenizer, fr_tokenizer)
 
-    print(f"Train size: {len(train_ds)}, Val size: {len(val_ds)}")
+    # print(f"Train size: {len(train_ds)}, Val size: {len(val_ds)}")
     train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=lambda b: collate_fn(b, en_tokenizer.token_to_id("[PAD]"), seq_len))
     val_dl = DataLoader(val_ds, batch_size=batch_size, shuffle=True, collate_fn=lambda b: collate_fn(b, en_tokenizer.token_to_id("[PAD]"), seq_len))
     
@@ -122,6 +122,7 @@ def get_dataloaders(seq_len, batch_size, vocab_size, src_tokenizer_path, tgt_tok
 
 #%%
 if __name__ == "__main__":
+    
     train_dl, val_dl, en_tokenizer, fr_tokenizer = get_dataloaders(
         seq_len=32, 
         batch_size=16, 

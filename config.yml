@@ -1,13 +1,13 @@
 # Training Configuration
 training:
-  n_epochs: 1
+  n_epochs: 15
   batch_size: 16
-  lr: 1e-3
+  lr: 1
   warmup: 4000
 
 # Model Architecture
 model:
-  seq_len: 350
+  seq_len: 128
   d_model: 512
   d_ff: 2048  # 4 * d_model
   num_heads: 8
