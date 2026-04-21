@@ -94,11 +94,13 @@ class MultiHeadAttention(nn.Module):
         attn_score = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(d_k)
         
         if mask is not None:
-            attn_score.masked_fill(mask==0, 1e-9)
+            # ADDITIVE MODIFICATION
+            # Since mask contains 0.0 (keep) and -1e9 (discard), we just ADD.
+            attn_score = attn_score + mask
         
         attn_weights = F.softmax(attn_score, dim=-1)
         attn_weights = dropout(attn_weights)
-        
+    
         output = torch.matmul(attn_weights, V)  # (batch, n_heads, seq, seq) x (batch, n_heads, seq, d_k) -> (batch, n_heads, seq, d_k)
         return attn_weights, output
         
@@ -150,7 +152,7 @@ class SkipConnection(nn.Module):
         self.dropout = nn.Dropout(dropout)
     
     def forward(self, x: torch.Tensor, sublayer: torch.Tensor):
-        return x + self.dropout(self.norm(sublayer)) # Pre-LN is easier to train, as it avoids gradients exploding at the start, which could happen with post-LN
+        return x + self.dropout(sublayer(self.norm(x))) # Pre-LN is easier to train, as it avoids gradients exploding at the start, which could happen with post-LN
     
 class EncoderBlock(nn.Module):
     def __init__(self, d_model: int=512, n_heads: int =8, d_ff: int = 2048, dropout:float =0.1):
@@ -162,10 +164,8 @@ class EncoderBlock(nn.Module):
         )
         
     def forward(self, x: torch.Tensor,  mask: Optional[torch.Tensor]):
-        attn_out = self.mha_attn_block(x, x, x, mask)
-        x = self.skip_connections[0](x, attn_out)        
-        ff_out = self.ff_block(x)
-        return self.skip_connections[1](x, ff_out)
+        x = self.skip_connections[0](x, lambda x: self.mha_attn_block(x, x, x, mask))
+        return self.skip_connections[1](x, self.ff_block)
 
 class Encoder(nn.Module):
     def __init__(self,  vocab_size: int, seq_len:int, N: int = 6,  d_model: int = 512, d_ff:int = 2048, n_heads: int = 8, dropout: float = 0.1):
@@ -202,17 +202,14 @@ class DecoderBlock(nn.Module):
     def forward(self, x: torch.Tensor, encoder_output: torch.Tensor, src_mask: torch.Tensor, tgt_mask: torch.Tensor):
         # 1. Masked Self-Attention (Query=x, Key=x, Value=x)
         # Uses tgt_mask (Look-Ahead + Padding)
-        _x = self.self_attn(x, x, x, tgt_mask)
-        x = self.skip_connections[0](x, _x)
+        x = self.skip_connections[0](x, lambda x: self.self_attn(x, x, x, tgt_mask))
         
         # 2. Cross-Attention (Query=x, Key=Encoder, Value=Encoder)
         # Uses src_mask (Source Padding)
-        _x = self.cross_attn(q=x, k=encoder_output, v=encoder_output, mask=src_mask)
-        x = self.skip_connections[1](x, _x)
+        x = self.skip_connections[1](x, lambda x: self.cross_attn(q=x, k=encoder_output, v=encoder_output, mask=src_mask))
         
         # 3. Feed-forward
-        _x = self.ff_block(x)
-        x = self.skip_connections[2](x, _x)
+        x = self.skip_connections[2](x, self.ff_block)
         return x
 
 class Decoder(nn.Module):
@@ -257,10 +254,10 @@ class Transformer(nn.Module):
     def forward(self, src, tgt):
         # 1. Create Masks
         # (B, 1, 1, SrcLen) - Expanded for heads
-        src_mask = self.make_src_pad_mask(src, self.pad_id).unsqueeze(1).unsqueeze(2) 
+        src_mask = self.make_src_mask(src, self.pad_id) # moved the reshaping to the function itself
 
         # (B, 1, TgtLen, TgtLen) - Expanded for heads
-        tgt_mask = self.make_decoder_mask(tgt, self.pad_id).unsqueeze(1)
+        tgt_mask = self.make_tgt_mask(tgt, self.pad_id)
 
         # 2. Encoder
         # Uses src_mask to ignore pads in self-attention
@@ -269,7 +266,7 @@ class Transformer(nn.Module):
         # 3. Decoder
         # tgt_mask: Used in Self-Attention (Mask Future + Pads)
         # src_mask: Used in Cross-Attention (Mask Encoder Pads)
-        out = self.decoder(tgt, memory, src_mask=src_mask, tgt_mask=tgt_mask,)
+        out = self.decoder(tgt, memory, src_mask=src_mask, tgt_mask=tgt_mask)
         out = self.projection_layer(out)
         return out # don't return probabilities, CE loss is being used
    
@@ -278,55 +275,71 @@ class Transformer(nn.Module):
             if p.dim() > 1 :
                 nn.init.xavier_uniform_(p)
                 
-    # masking
-    def make_src_pad_mask(self, src_ids, pad_id):
-        # src_ids = (B, seq_len)
-        return (src_ids == pad_id)
-    def make_tgt_pad_mask(self, tgt_ids, pad_id):
-        return (tgt_ids == pad_id)   # (B, T)
-    def make_causal_mask(self, size, device):
-        return torch.triu(
-            torch.ones(size, size, dtype=torch.bool, device=device),
-            diagonal=1
-        )
-    def make_decoder_mask(self, tgt_ids, pad_id):
-        B, T = tgt_ids.shape
-
-        pad_mask = self.make_tgt_pad_mask(tgt_ids, pad_id)     # (B, T)
-        causal = self.make_causal_mask(T, tgt_ids.device)      # (T, T)
-
-        # broadcast to (B, T, T)
-        return pad_mask.unsqueeze(1) | causal
+    # masking. Use KEEP, additive mask
+    # 1/True -> use this token, 0/False -> ignore this token, pad it
+    def make_src_mask(self, src: torch.Tensor, pad_id:int):
+        """
+            Creates an additive mask for the Encoder (Source).
+            src: (batch, seq_len)
+            mask shape: (batch, 1, 1, seq_Len)
+        """
+        # create the boolean mask
+        mask = (src != pad_id).unsqueeze(1).unsqueeze(2)
+        
+        # convert to additive float mask
+        return torch.zeros_like(mask, dtype=torch.float).masked_fill(~mask, -1e9)
     
+    def make_tgt_mask(self, tgt: torch.Tensor, pad_id: int):
+        """
+            Creates an additive causal mask for the Decoder (Target).
+            Shape: (Batch, 1, Seq_Len, Seq_Len)
+        """
+        B, L = tgt.shape
+        device = tgt.device
+        
+        # padding mask,(Keep non-pads) - (Batch, 1, 1, Seq_Len)
+        pad_mask = (tgt != pad_id).unsqueeze(1).unsqueeze(2)
+        
+        # Causal Mask (Keep Lower Triangle) - (Seq_Len, Seq_Len)
+        causal_mask = torch.tril(
+            torch.ones((L, L), device=device)
+        ).bool()
+        
+        # Combine: We keep a position if it is NOT padding AND it is in the Past/Current
+        combined_mask = pad_mask & causal_mask
+        
+        return torch.zeros_like(combined_mask, dtype=torch.float).masked_fill(~combined_mask, -1e9)
+        
     def greedy_decode(self, src: torch.Tensor, sos_id: int, eos_id: int) -> torch.Tensor:
         batch = src.size(0)
         device = src.device
         
-        src_mask = self.make_src_pad_mask(src, self.pad_id).unsqueeze(1).unsqueeze(2)         
+        # src_mask = self.make_src_mask(src, self.pad_id).unsqueeze(1).unsqueeze(2) - moved the reshaping to the function itself
+        src_mask = self.make_src_mask(src, self.pad_id)        
         memory = self.encoder(src, src_mask=src_mask) # (batch, seq_len, d_model)
         
         # start with just the SOS token
         decoder_input = torch.full((batch, 1), sos_id, dtype=torch.long, device=device)
-        # decoder_input = torch.full((batch, self.tgt_seq_len), self.pad_id, dtype=torch.long, device=device)
-        # decoder_input[:, 0] = sos_id
         
         # Track which sequences have finished
         finished = torch.zeros(batch, dtype=torch.bool, device=device)
-        # for i in range(1, self.tgt_seq_len):
+
         for _ in range(self.tgt_seq_len - 1):
-            tgt_mask = self.make_decoder_mask(decoder_input, self.pad_id).unsqueeze(1)
+            tgt_mask = self.make_tgt_mask(decoder_input, self.pad_id)
             
             out = self.decoder(decoder_input, memory, src_mask=src_mask, tgt_mask=tgt_mask)
-            # we only care about the logits of the last output
-            probab = F.softmax(out[:, -1, :], dim=-1)
-            next_tokens = probab.argmax(dim=-1)
+            prob = self.projection_layer(out) # (batch, seq_len, vocab_size)
             
-            # out =  F.softmax(
-            #     self.decoder(decoder_input, memory, src_mask=src_mask, tgt_mask=tgt_mask),
-            #     dim=-1) # (batch, tgt_seq_len, vocab_size)
+            # 1. Isolate the prediction for the LAST timestep
+            # prob[:, -1, :] has shape (batch, vocab_size)
+            next_word_prob = prob[:, -1, :]
+            # print(f"Next word prob shape: {next_word_prob.shape} {next_word_prob}"
+            #         f"Decoder input shape: {decoder_input.shape} {decoder_input}"
+            #         f"Finished shape: {finished.shape} {finished}")
             
-            # Take prediction for *current* position
-            # next_tokens = out[:, i-1, :].argmax(dim=-1) # (batch, )
+            # 2. Get the index of the max probability over the vocab dimension
+            # next_tokens has shape (batch, )
+            next_tokens = torch.argmax(next_word_prob, dim=-1)
             
             # Do not overwrite tokens after EOS. For postn finished is true, it will take a PAD id, otherwise next_token id 
             next_tokens = torch.where(
@@ -337,7 +350,6 @@ class Transformer(nn.Module):
             
             # Concatenate the new token
             decoder_input = torch.cat([decoder_input, next_tokens.unsqueeze(1)], dim=1)
-            # decoder_input[:, i] = next_tokens
             
             # update finished mask
             finished |= (next_tokens == eos_id)
@@ -345,33 +357,6 @@ class Transformer(nn.Module):
             if finished.all():
                 break
         return decoder_input
-    
-    # def greedy_decode(self, src: torch.Tensor, sos_id: int, eos_id: int) -> torch.Tensor:
-    #     src_mask = self.make_src_pad_mask(src, self.pad_id).unsqueeze(1).unsqueeze(2) 
-    #     memory = self.encoder(src, src_mask=src_mask) # (batch, seq_len, d_model)
-        
-    #     batch, seq_len = src.shape
-    #     decoder_input = torch.full((batch, self.tgt_seq_len), self.pad_id)
-    #     decoder_input[:, 0] = sos_id
-        
-    #     eos_tensor = torch.full((1, self.tgt_seq_len), eos_id)
-        
-    #     # model would be called at max seq_len times for each input
-    #     for i in range(1, self.tgt_seq_len):
-    #         tgt_mask = self.make_decoder_mask(decoder_input, self.pad_id)
-            
-    #         out =  F.softmax(
-    #                 self.decoder(decoder_input, memory, src_mask=src_mask, tgt_mask=tgt_mask),
-    #                 dim=-1) # (batch, tgt_seq_len, vocab_size)
-            
-    #         next_tokens = out[:, i, :].argmax(dim=-1) # (batch, )
-    #         decoder_input[:, i] = next_tokens
-            
-    #         # check for EOS in each batch
-    #         mask = (decoder_input == eos_tensor)
-    #         decoder_input = decoder_input[mask]
-        
-    #     return decoder_input
 
 # class Encoder(nn.Module):
 #     def __init__(self, N: int = 6, d_model: int = 512, n_heads: int = 8, droput: float = 0.1):
