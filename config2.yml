@@ -1,7 +1,7 @@
 # Training Configuration
 training:
-  n_epochs: 20 #15
-  batch_size: 16
+  n_epochs: 20
+  batch_size: 64
   lr: 1
   warmup: 4000
 

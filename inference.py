@@ -4,10 +4,11 @@ import torch.nn.functional as F
 from model import Transformer
 from dataset import get_dataloaders, get_tokenizer
 from typing import List
-
+from tokenizers import Tokenizer
+import argparse
 
 def load_model(model_path: str):
-    ckpoint = torch.load(model_path)
+    ckpoint = torch.load(model_path, map_location=torch.device('cpu'))
     
     config = ckpoint['config']
     SEQ_LEN = config['model']['seq_len']
@@ -26,42 +27,24 @@ def load_model(model_path: str):
     
     return model, config
 
+def tokenize_user_input(user_input:str, tokenizer:Tokenizer, seq_len:int):
+    ids = tokenizer.encode(user_input).ids
+    ids = ids[:seq_len-2] # account for SOS and EOS
+    sos_id = tokenizer.token_to_id("[SOS]")
+    pad_id = tokenizer.token_to_id("[PAD]")
+    eos_id = tokenizer.token_to_id("[EOS]")
+    ids = [sos_id] + ids + [eos_id]
+    if len(ids) < seq_len:
+        ids += [pad_id] * (seq_len - len(ids))
+    ids_tensor = torch.tensor(ids, dtype=torch.long).unsqueeze(0) # (
+    return ids_tensor
+
 def generate_target(model: Transformer, config, n_examples:int, user_exs:str=None) -> List[str]:
     en_tokenizer = get_tokenizer(lang="en", tokenizer_path=config['data']['src_tokenizer_path'])
     fr_tokenizer = get_tokenizer(lang="fr", tokenizer_path=config['data']['tgt_tokenizer_path'])
     sos_id = fr_tokenizer.token_to_id("[SOS]")
     eos_id = fr_tokenizer.token_to_id("[EOS]")
     tgt_sentence = []
-    
-    # _, val_dl, _, _ = get_dataloaders(
-    #         config['model']['seq_len'],
-    #         16,
-    #         config['model']['vocab_size'],
-    #         config['data']['src_tokenizer_path'], 
-    #         config['data']['tgt_tokenizer_path'],
-    #         config['data']['test_size']
-    #     ) 
-    # model.eval()
-    
-    # with torch.no_grad():
-    #     for batch in val_dl:
-    #         input_ids = batch["src_ids"]
-    #         decoder_input = batch["tgt_ids"][:, :-1]
-    #         logits = model(input_ids, decoder_input)
-    #         out = F.softmax(logits, dim=-1)
-    #         next_tokens = out.argmax(dim=-1)
-    #         break
-    
-    # src_sentence = en_tokenizer.decode_batch(input_ids.tolist())
-    # print("##################### ENGLISH SETNECE  #####################")
-    # print(src_sentence[0])
-    # gen_sentences = fr_tokenizer.decode_batch(next_tokens.tolist())
-    # print("##################### TRANSLATION  #####################")
-    # print( gen_sentences[0])
-    
-    # print("##################### ACTUAL  #####################")
-    # tgt_sentence = fr_tokenizer.decode_batch(decoder_input.tolist())
-    # print(tgt_sentence[0])
     
     if user_exs is None:
         # sample n_examples sentences from the dataset and return those
@@ -75,12 +58,10 @@ def generate_target(model: Transformer, config, n_examples:int, user_exs:str=Non
         ) 
         for item in val_dl:
             examples = item["src_ids"]
-            tgt = item["tgt_ids"]
-            tgt_sentence.append(tgt)
+            tgt_sentence = item["tgt_ids"].detach().cpu().tolist()
             break
     else:
-        examples = [user_exs]
-        examples = torch.tensor(examples).to(next(model.parameters()).device)
+        examples = tokenize_user_input(user_exs, en_tokenizer, config['model']['seq_len'])
         
     model.eval()
     with torch.no_grad():
@@ -89,16 +70,25 @@ def generate_target(model: Transformer, config, n_examples:int, user_exs:str=Non
     gen_sentences = fr_tokenizer.decode_batch(gen_ids)
     
     src_sentence = en_tokenizer.decode_batch(examples.tolist())
-    print("##################### ENGLISH SETNECE  #####################")
+    print(f"\n##################### ENGLISH SETNECE  #####################")
     print(src_sentence[0])
     
-    print("##################### TRANSLATION  #####################")
+    print(f"\n##################### TRANSLATION  #####################")
     print( gen_sentences[0])
     
     if tgt_sentence:
-        print("Target sentces: ", tgt_sentence)
+        print(f"\n##################### TARGET SENTENCE  #####################")
+        tgt_sentence = fr_tokenizer.decode_batch(tgt_sentence)
+        print(tgt_sentence[0])
 
 if __name__ == "__main__":
-    ckpoint_path = "checkpoints/transformer_epoch_5.pt"
+    
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model-path", type=str, help="Path to the model checkpoint")
+    parser.add_argument("--n-examples", type=int, default=1, help="Number of examples to generate")
+    parser.add_argument("--user-exs", type=str, default=None, help="User provided examples to translate")
+    args = parser.parse_args()
+    
+    ckpoint_path = args.model_path
     model, config = load_model(ckpoint_path)
-    generate_target(model, config, 1)
+    generate_target(model, config, args.n_examples, user_exs=args.user_exs)

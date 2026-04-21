@@ -8,7 +8,7 @@ from model import Transformer
 from dataset import get_dataloaders
 from tqdm import tqdm
 from torch.utils.data import Dataset, DataLoader, random_split
-
+import argparse
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -16,7 +16,7 @@ except Exception:  # pragma: no cover
     SummaryWriter = None
 
 # Load configuration from YAML file
-def load_config(config_path='config.yml'):
+def load_config(config_path='config2.yml'):
     print(f"Loading configuration from {config_path}")
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
@@ -43,7 +43,7 @@ def _load_checkpoint(checkpoint_path: str, model: nn.Module, optimizer: torch.op
     print(f"Loaded checkpoint (epoch={start_epoch}, global_step={global_step})")
     return start_epoch, global_step
 
-def train(config):
+def train(config, model_artifact_name=None):
     # Training hyperparameters
     N_EPOCHS = int(config['training']['n_epochs'])
     BATCH_SIZE = int(config['training']['batch_size'])
@@ -139,7 +139,7 @@ def train(config):
             logits = model(input_ids, decoder_input) # shape: (batch, seq_len, vocab_size)
 
             loss = loss_fn(logits.view(-1, VOCAB_SIZE),
-                           target_labels.view(-1)) # flattens the target_labels, as NLLLoss expects the target to be indices of tgt class (NOT a 1-hot vector)
+                           target_labels.reshape(-1)) # flattens the target_labels, as NLLLoss expects the target to be indices of tgt class (NOT a 1-hot vector)
             global_step += 1
             epoch_loss_sum += float(loss.item())
             epoch_loss_count += 1
@@ -165,7 +165,6 @@ def train(config):
                     if param.grad is not None:
                         # tag example: "encoder.layers.0.self_attn.in_proj_weight"
                         writer.add_histogram(f"grad/{name}", param.grad, global_step)
-                        # You can also log weights to see if they are changing
                         # writer.add_histogram(f"weight/{name}", param, global_step)
             
             optimizer.step()           
@@ -174,23 +173,26 @@ def train(config):
         # save the model after each epoch. Save under folder 'checkpoints/'
         if not os.path.exists('checkpoints/'):
             os.makedirs('checkpoints/')
-        torch.save({
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'epoch': epoch+1,
-            'global_step': global_step,
-            'config' : config
-        }, f'checkpoints/transformer_noam_epoch_{epoch+1}.pt')
+        
+        # save every even epoch, or if it's the last epoch
+        if (epoch + 1) % 2 == 0 or (epoch + 1) == N_EPOCHS:
+            torch.save({
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'epoch': epoch+1,
+                'global_step': global_step,
+                'config' : config
+            }, f'checkpoints/{model_artifact_name}_epoch_{epoch+1}.pt')
 
     if writer is not None:
         writer.flush()
         writer.close()
     
 if __name__ == "__main__":
-    # parser = argparse.ArgumentParser(description="Train Transformer")
-    # parser.add_argument('--config', type=str, default='config.yml', help='Path to YAML config')
-    # args = parser.parse_args()
-
-    config = load_config()
-    # config = load_config(args.config)
-    train(config)
+    parser = argparse.ArgumentParser(description="Train Transformer")
+    parser.add_argument('--config', type=str, default='config.yml', help='Path to YAML config')
+    parser.add_argument('--model-artifact-name', type=str, default=None, help='Optional name for model artifact (for logging)')
+    args = parser.parse_args()
+    
+    config = load_config(args.config)
+    train(config, model_artifact_name=args.model_artifact_name)
