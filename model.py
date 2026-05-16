@@ -251,7 +251,7 @@ class Transformer(nn.Module):
         self.projection_layer = nn.Linear(d_model, tgt_vocab_size)
         self._init_parameters()
     
-    def forward(self, src, tgt):
+    def forward(self, src, tgt, encoder_memory=None):
         # 1. Create Masks
         # (B, 1, 1, SrcLen) - Expanded for heads
         src_mask = self.make_src_mask(src, self.pad_id) # moved the reshaping to the function itself
@@ -260,15 +260,19 @@ class Transformer(nn.Module):
         tgt_mask = self.make_tgt_mask(tgt, self.pad_id)
 
         # 2. Encoder
-        # Uses src_mask to ignore pads in self-attention
-        memory = self.encoder(src, src_mask=src_mask)
+        if torch.is_tensor(encoder_memory):
+            # avoid calling the encoder again. used for inferencing
+            memory = encoder_memory
+        else:
+            # Uses src_mask to ignore pads in self-attention
+            memory = self.encoder(src, src_mask=src_mask)
 
         # 3. Decoder
         # tgt_mask: Used in Self-Attention (Mask Future + Pads)
         # src_mask: Used in Cross-Attention (Mask Encoder Pads)
         out = self.decoder(tgt, memory, src_mask=src_mask, tgt_mask=tgt_mask)
         out = self.projection_layer(out)
-        return out # don't return probabilities, CE loss is being used
+        return out # don't return probabilities, logits instead since CE loss is being used
    
     def _init_parameters(self):
         for p in self.parameters():
@@ -333,9 +337,6 @@ class Transformer(nn.Module):
             # 1. Isolate the prediction for the LAST timestep
             # prob[:, -1, :] has shape (batch, vocab_size)
             next_word_prob = prob[:, -1, :]
-            # print(f"Next word prob shape: {next_word_prob.shape} {next_word_prob}"
-            #         f"Decoder input shape: {decoder_input.shape} {decoder_input}"
-            #         f"Finished shape: {finished.shape} {finished}")
             
             # 2. Get the index of the max probability over the vocab dimension
             # next_tokens has shape (batch, )
@@ -357,59 +358,58 @@ class Transformer(nn.Module):
             if finished.all():
                 break
         return decoder_input
-
-# class Encoder(nn.Module):
-#     def __init__(self, N: int = 6, d_model: int = 512, n_heads: int = 8, droput: float = 0.1):
-#         self.N = N
-#         self.d_model = d_model
-#         self.h = n_heads
-#         self.encoder_block = nn.Sequential(
-#             *[MultiHeadAttention(d_model, n_heads, droput) for _ in range(N)]
-#         )
-# class MultiHeadAttention(nn.Module):
-#     def __init__(self, d_model:int=512, n_heads:int=4) -> None:
-#         super().__init__()
-#         self.d_model = d_model
-#         self.h = n_heads
-#         self.concat_layer = nn.Linear(d_model, d_model)
-#     def forward(self, x: torch.Tensor) -> torch.Tensor :
-#         """
-        
-#         Args:
-#             x: input tensor of shape: (batch_size, seq_len, d_model)
-#         inp embedding (x) -> ( q,k,v proj layer -> (q, k, v) -> attn layer ) x h -> concat -> linear
-#         """
-#         heads = []
-#         for head in range(self.h):
-#             attn = Attention(x)
-#             heads.append(attn)
-#         head_tensor = torch.hstack(tuple(heads))
-#         return self.concat_layer(head_tensor)   
-# class Attention(nn.Module):
-#     """
-#     Class for computing the scaled dot-product self-attention function.
-#     Will be used as the base class, which the MHA will wrap around
-#     """
-#     def __init__(self, attn_mask: Optional[torch.Tensor]=None, d_model:int=512, n_heads:int=6) -> None:
     
-#         super().__init__()
+    def beam_search_decode(self, src: torch.Tensor, sos_id:int, eos_id:int, beam_width:int=2) -> torch.Tensor:
+        """
+        Initially, keep track of beam_width number of highest probab output tokens. For each timestamp, or sequence, again generate
+        beam_width number of token with respective prev generated token in decoder_input. 
 
-#         self.mask = attn_mask
-#         self.d_model = d_model
-#         self.h = n_heads
-#         self.q_proj = nn.Linear(self.d_model, self.d_model//self.h)
-#         self.k_proj = nn.Linear(self.d_model, self.d_model//self.h)
-#         self.v_proj = nn.Linear(self.d_model, self.d_model//self.h)
-#         self.attention_weights = None
+        Assuming src doesn't have batch dimension, only (1, seq_len)
+        """
+        batch = src.size(0)
+        device = src.device
         
-#     def forward(self, x: torch.Tensor):
-#         q_d = self.q_proj(x)
-#         k_d = self.k_proj(x)
-#         v_d = self.v_proj(x)
-#         attn_score = torch.matmul(q_d, k_d.transpose(0, 1))
+        decoder_input = torch.full((batch, 1), fill_value=sos_id, dtype=torch.long, device=device)
         
-#         if self.mask is not None:
-#             pass
+        src_mask = self.make_src_mask(src, self.pad_id)        
+        memory = self.encoder(src, src_mask=src_mask)
+        prob = self.forward(src, decoder_input, memory)
         
-#         self.attention_weights = F.softmax(attn_score/math.sqrt(self.d_model))
-#         return torch.matmul(self.attention_weights, v_d)
+        next_candidates = prob[:, -1, :] # (1, vocab_size). Prediction for the last timestamp. These are logits
+        
+        final_seq = torch.full((beam_width, 1), fill_value=sos_id, dtype=torch.long, device=device) # will grow to (beam_width, tgt_seq_len)
+        final_seq_probab = torch.zeros((1, beam_width), dtype=torch.float) # will remain (beam_width,)
+        
+        for _ in range(self.tgt_seq_len - 1):
+            beam_probs, beam_indices = torch.topk(next_candidates, k=beam_width) # (1, beam_width)
+            
+            print(beam_probs.shape, beam_indices.shape)
+            
+            final_seq_probab = torch.add(final_seq_probab, beam_probs)
+            final_seq = torch.cat([final_seq, beam_indices.T], dim=1)
+            print("final sequence: ", final_seq.shape)
+            next_beam = []
+            for i in range(beam_width):
+                candidate = beam_indices[:, i]
+
+                # append this candidate to decoder_input, and feed that to the model again
+                decoder_input = torch.cat([decoder_input, candidate.unsqueeze(1)], dim=1)
+
+                prob = self.forward(src, decoder_input, memory)
+                next_word_probab = prob[:, -1, :]
+
+                next_beam.append(next_word_probab)
+                
+            next_candidates = torch.stack(next_beam) # doing a vstack. (beam_width, 1, vocab_size)
+            
+            # add beam_probabs to each of the token probabs in next_candidates
+            next_candidates = next_candidates + beam_probs.T.unsqueeze(2)
+            next_candidates = next_candidates.squeeze(1)
+            next_candidates = next_candidates.reshape((1, -1))
+            print("next_candidates: ", next_candidates.shape)
+    
+        likely_seq = final_seq[torch.argmax(final_seq_probab), :]
+        return likely_seq
+            
+                
+            
