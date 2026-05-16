@@ -366,50 +366,69 @@ class Transformer(nn.Module):
 
         Assuming src doesn't have batch dimension, only (1, seq_len)
         """
-        batch = src.size(0)
         device = src.device
-        
-        decoder_input = torch.full((batch, 1), fill_value=sos_id, dtype=torch.long, device=device)
         
         src_mask = self.make_src_mask(src, self.pad_id)        
         memory = self.encoder(src, src_mask=src_mask)
-        prob = self.forward(src, decoder_input, memory)
+        print("memory: ", memory.shape)
         
-        next_candidates = prob[:, -1, :] # (1, vocab_size). Prediction for the last timestamp. These are logits
+        # initial forward pass
+        decoder_input = torch.full((1, 1), fill_value=sos_id, dtype=torch.long, device=device)
+        logits = self.forward(src, decoder_input, memory)
         
-        final_seq = torch.full((beam_width, 1), fill_value=sos_id, dtype=torch.long, device=device) # will grow to (beam_width, tgt_seq_len)
-        final_seq_probab = torch.zeros((1, beam_width), dtype=torch.float) # will remain (beam_width,)
+        log_probs = F.log_softmax(logits[:, -1, :], dim=-1)
         
-        for _ in range(self.tgt_seq_len - 1):
-            beam_probs, beam_indices = torch.topk(next_candidates, k=beam_width) # (1, beam_width)
+        # get the initial candidates
+        beam_scores, beam_tokens = torch.topk(log_probs, k=beam_width) # (1, beam_width)
+        beam_scores = beam_scores.squeeze(0) # (k,)
+        beam_tokens = beam_tokens.squeeze(0)
+        
+        # initialize beam state
+        # final_seq = torch.full((beam_width, 1), fill_value=sos_id, dtype=torch.long, device=device) # will grow to (beam_width, tgt_seq_len)
+        active_seq = torch.cat([
+            torch.full((beam_width, 1), fill_value=sos_id, dtype=torch.long, device=device),
+            beam_tokens.unsqueeze(1)
+        ], dim = -1)
+        
+        # Expand encoder outputs to batch size 'k' for parallel cross-attention
+        memory = memory.expand(beam_width, -1, -1) # (k, src_len, d_model)
+        
+        src = src.expand(beam_width, -1)
+        
+        # we already have the first token generated 
+        for _ in range(self.tgt_seq_len - 2):
+            # Forward pass for all active beams in parallel
+            logits = self.forward(src, active_seq, memory) 
             
-            print(beam_probs.shape, beam_indices.shape)
+            next_log_probs = F.log_softmax(logits[:, -1, :], dim=-1) # (k, vocab_size)
             
-            final_seq_probab = torch.add(final_seq_probab, beam_probs)
-            final_seq = torch.cat([final_seq, beam_indices.T], dim=1)
-            print("final sequence: ", final_seq.shape)
-            next_beam = []
-            for i in range(beam_width):
-                candidate = beam_indices[:, i]
-
-                # append this candidate to decoder_input, and feed that to the model again
-                decoder_input = torch.cat([decoder_input, candidate.unsqueeze(1)], dim=1)
-
-                prob = self.forward(src, decoder_input, memory)
-                next_word_probab = prob[:, -1, :]
-
-                next_beam.append(next_word_probab)
-                
-            next_candidates = torch.stack(next_beam) # doing a vstack. (beam_width, 1, vocab_size)
+            #Add the historical beam score to the new token scores
+            candidate_scores = beam_scores.unsqueeze(1) + next_log_probs # (k,1) + (k,vocab_size), broadcasting
+           
+            # Flatten the scores to find the top k overall across ALL beams and vocabulary
+            vocab_size = candidate_scores.size(-1)
+            candidate_scores = candidate_scores.view(-1) # or use reshape ? 
             
-            # add beam_probabs to each of the token probabs in next_candidates
-            next_candidates = next_candidates + beam_probs.T.unsqueeze(2)
-            next_candidates = next_candidates.squeeze(1)
-            next_candidates = next_candidates.reshape((1, -1))
-            print("next_candidates: ", next_candidates.shape)
-    
-        likely_seq = final_seq[torch.argmax(final_seq_probab), :]
-        return likely_seq
+            top_scores, top_indices = torch.topk(candidate_scores, k=beam_width)
             
-                
+            # track lineage
+            beam_indices = torch.div(top_indices, vocab_size, rounding_mode='trunc')
+            token_indices = top_indices % vocab_size
+            
+            # update sequence and scores
+            beam_scores = top_scores
+            # the wining parent beam indices, based on the new scores
+            selected_indices = active_seq[beam_indices]
+            
+            #append the new tokens
+            active_seq = torch.cat([
+                selected_indices,
+                token_indices.unsqueeze(1)
+            ], dim=-1) # (k, current_seq_len + 1)
+            
+            if (token_indices == eos_id).all():
+                break
+        best_idx = torch.argmax(beam_scores)
+        best_seq = active_seq[best_idx]
+        return best_seq.unsqueeze(0)
             
