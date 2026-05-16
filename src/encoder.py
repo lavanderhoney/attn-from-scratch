@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 from typing import Optional
-from layers import Embeddings, PositionalEncoding, SkipConnection, FeedForwardBlock
-from attention import MultiHeadAttention
+from src.layers import Embeddings, PositionalEncoding, SkipConnection, FeedForwardBlock
+from src.attention import MultiHeadAttention
 
 class EncoderBlock(nn.Module):
     def __init__(self, d_model: int=512, n_heads: int =8, d_ff: int = 2048, dropout:float =0.1):

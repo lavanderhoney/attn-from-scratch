@@ -4,8 +4,8 @@ import torch.nn.functional as F
 import yaml
 import os
 import argparse
-from model import Transformer
-from dataset import get_dataloaders
+from src.model import Transformer
+from training.dataset import get_dataloaders
 from tqdm import tqdm
 from torch.utils.data import Dataset, DataLoader, random_split
 import argparse
@@ -23,7 +23,7 @@ def load_config(config_path='config2.yml'):
     return config
 
 
-def _load_checkpoint(checkpoint_path: str, model: nn.Module, optimizer: torch.optim.Optimizer | None, device: torch.device):
+def _load_checkpoint(checkpoint_path: str, model: nn.Module, optimizer: torch.optim.Optimizer | None,  device: torch.device,scheduler: torch.optim.lr_scheduler.LambdaLR|None = None) -> tuple[int, int]:
     checkpoint_path = str(checkpoint_path)
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
@@ -37,7 +37,15 @@ def _load_checkpoint(checkpoint_path: str, model: nn.Module, optimizer: torch.op
 
     if optimizer is not None and 'optimizer_state_dict' in ckpt and ckpt['optimizer_state_dict'] is not None:
         optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-
+        
+    if scheduler is not None and 'scheduler_state_dict' in ckpt:
+        scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+        
+    if 'cpu_rng_state' in ckpt:
+        torch.set_rng_state(ckpt['cpu_rng_state'])
+    if 'gpu_rng_state' in ckpt and ckpt['gpu_rng_state'] is not None and torch.cuda.is_available():
+        torch.cuda.set_rng_state(ckpt['gpu_rng_state'])
+        
     start_epoch = int(ckpt.get('epoch', 0))
     global_step = int(ckpt.get('global_step', 0))
     print(f"Loaded checkpoint (epoch={start_epoch}, global_step={global_step})")
@@ -98,10 +106,9 @@ def train(config, model_artifact_name=None):
 
     loss_fn = nn.CrossEntropyLoss(ignore_index=en_tokenizer.token_to_id("[PAD]"), label_smoothing=0.1).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
-    
-    # Noam Scheduler
+
+        # Noam Scheduler
     lr_lambda = lambda step: (D_MODEL ** -0.5) * min(max(1, step) ** -0.5, step*(WARMUP ** -1.5))
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda )
 
     start_epoch = 0
     global_step = 0
@@ -111,6 +118,9 @@ def train(config, model_artifact_name=None):
         if start_epoch >= N_EPOCHS:
             print(f"Checkpoint epoch ({start_epoch}) >= n_epochs ({N_EPOCHS}); nothing to train.")
             return
+        print(f"Resuming training from epoch {start_epoch} (global step {global_step})")
+    
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda, last_epoch=global_step)
 
     writer = None
     if SummaryWriter is None:
@@ -179,9 +189,12 @@ def train(config, model_artifact_name=None):
             torch.save({
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
                 'epoch': epoch+1,
                 'global_step': global_step,
-                'config' : config
+                'config' : config,
+                'cpu_rng_state': torch.get_rng_state(),
+                'gpu_rng_state': torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
             }, f'checkpoints/{model_artifact_name}_epoch_{epoch+1}.pt')
 
     if writer is not None:
@@ -191,7 +204,7 @@ def train(config, model_artifact_name=None):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Transformer")
     parser.add_argument('--config', type=str, default='config.yml', help='Path to YAML config')
-    parser.add_argument('--model-artifact-name', type=str, default=None, help='Optional name for model artifact (for logging)')
+    parser.add_argument('--model-artifact-name', type=str, default='model', help='Optional name for model artifact (for logging)')
     args = parser.parse_args()
     
     config = load_config(args.config)

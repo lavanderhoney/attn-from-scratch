@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from model import Transformer
-from dataset import get_dataloaders, get_tokenizer
+from src.model import Transformer
+from training.dataset import get_dataloaders, get_tokenizer
 from typing import List
 from tokenizers import Tokenizer
 import argparse
@@ -65,17 +65,20 @@ def generate_target(model: Transformer, config, n_examples:int, user_exs:str=Non
         
     model.eval()
     with torch.no_grad():
-        gen_ids = model.greedy_decode(examples, sos_id, eos_id).detach().cpu().tolist()
-    
-    gen_sentences = fr_tokenizer.decode_batch(gen_ids)
-    
+        gen_ids_gr = model.greedy_decode(examples, sos_id, eos_id).detach().cpu().tolist()
+        gen_ids_beam = model.beam_search_decode(examples[0,:].unsqueeze(0), sos_id, eos_id, 3).detach().cpu().tolist()
+    gen_sentences_gr = fr_tokenizer.decode_batch(gen_ids_gr)
+    gen_sentences_beam = fr_tokenizer.decode_batch(gen_ids_beam)
+
     src_sentence = en_tokenizer.decode_batch(examples.tolist())
     print(f"\n##################### ENGLISH SETNECE  #####################")
     print(src_sentence[0])
     
-    print(f"\n##################### TRANSLATION  #####################")
-    print( gen_sentences[0])
-    
+    print(f"\n##################### GREEDY DECODING  #####################")
+    print(gen_sentences_gr[0])
+    print(f"\n##################### BEAM SEARCH DECODING  #####################")
+    print(gen_sentences_beam[0])
+
     if tgt_sentence:
         print(f"\n##################### TARGET SENTENCE  #####################")
         tgt_sentence = fr_tokenizer.decode_batch(tgt_sentence)
@@ -83,12 +86,13 @@ def generate_target(model: Transformer, config, n_examples:int, user_exs:str=Non
 
 if __name__ == "__main__":
     
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model-path", type=str, help="Path to the model checkpoint")
-    parser.add_argument("--n-examples", type=int, default=1, help="Number of examples to generate")
-    parser.add_argument("--user-exs", type=str, default=None, help="User provided examples to translate")
-    args = parser.parse_args()
+    # parser = argparse.ArgumentParser()
+    # parser.add_argument("--model-path", type=str, help="Path to the model checkpoint")
+    # parser.add_argument("--n-examples", type=int, default=1, help="Number of examples to generate")
+    # parser.add_argument("--user-exs", type=str, default=None, help="User provided examples to translate")
+    # args = parser.parse_args()
     
-    ckpoint_path = args.model_path
+    # ckpoint_path = args.model_path
+    ckpoint_path = "/teamspace/studios/this_studio/attn-from-scratch/checkpoints/transformer_noam_v2_epoch_30.pt"
     model, config = load_model(ckpoint_path)
-    generate_target(model, config, args.n_examples, user_exs=args.user_exs)
+    generate_target(model, config, 1, user_exs=None)

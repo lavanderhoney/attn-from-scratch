@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from encoder import Encoder
-from decoder import Decoder
+from src.encoder import Encoder
+from src.decoder import Decoder
 
 class Transformer(nn.Module):
     def __init__(self, src_vocab_size: int, tgt_vocab_size:int, src_seq_len:int, tgt_seq_len: int,  pad_id:int, N: int = 6, 

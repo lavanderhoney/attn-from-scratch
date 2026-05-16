@@ -1,9 +1,10 @@
 # Training Configuration
 training:
-  n_epochs: 20
+  n_epochs: 30
   batch_size: 64
   lr: 1
   warmup: 4000
+  resume_path: checkpoints/transformer_noam_v2_epoch_20.pt
 
 # Model Architecture
 model:
