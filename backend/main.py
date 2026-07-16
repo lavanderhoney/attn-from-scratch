@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, logger
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Literal
@@ -39,9 +39,11 @@ app.add_middleware(
 
 @app.on_event("startup")
 def load_generation_model():
-    global model, config
+    global model, config, src_tokenizer_path, tgt_tokenizer_path
+   
     print(f"Loading model from checkpoint: {CHECKPOINT_PATH} {CHECKPOINT_REPO_ID} {CHECKPOINT_FILENAME} {CHECKPOINT_REVISION}   ")
-    model, config = load_model_from_source(
+   
+    model, config, src_tokenizer_path, tgt_tokenizer_path = load_model_from_source(
         checkpoint_path=CHECKPOINT_PATH,
         hf_repo_id=CHECKPOINT_REPO_ID,
         hf_filename=CHECKPOINT_FILENAME,
@@ -54,10 +56,13 @@ def read_root():
 
 @app.post("/generate")
 def generate(request: GenerationRequest):
+    print(f"Received generation request: {request}")
     generated_sentences = generate_target(
         model,
         config,
         n_examples=1,
+        src_tokenizer_path=src_tokenizer_path,
+        tgt_tokenizer_path=tgt_tokenizer_path,
         user_exs=request.user_exs,
         decoding_method=request.decoding_method,
         beam_width=request.beam_width,

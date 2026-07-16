@@ -15,30 +15,51 @@ except Exception:  # pragma: no cover
     
 def _resolve_checkpoint_path(
     checkpoint_path: str | None = None,
+    src_tokenizer_path: str = "tokenizers/bpe_tokenizer_opus_en.json", # for now, keep it as tokenizer/bpe_tokenizer_opus_en.json
+    tgt_tokenizer_path: str = "tokenizers/bpe_tokenizer_opus_fr.json", # for now, keep it as tokenizer/bpe_tokenizer_opus_fr.json
     hf_repo_id: str | None = None,
     hf_filename: str | None = None,
     hf_revision: str | None = None,
 ) -> str:
     if checkpoint_path is not None and Path(checkpoint_path).exists():
-        return str(checkpoint_path)
+        return str(checkpoint_path), str(src_tokenizer_path), str(tgt_tokenizer_path)
 
     if hf_repo_id:
-        if hf_hub_download is None:
-            raise ImportError(
-                "huggingface_hub is required to load checkpoints from a Hugging Face repo. "
-                "Install it with: pip install huggingface_hub"
-            )
-        if not hf_filename:
-            raise ValueError("hf_filename is required when loading from a Hugging Face repo")
-        return hf_hub_download(repo_id=hf_repo_id, filename=hf_filename, revision=hf_revision)
+        model_cache_path = hf_hub_download(repo_id=hf_repo_id, filename=hf_filename, revision=hf_revision)
+        src_tokenizer_path = hf_hub_download(repo_id=hf_repo_id, filename=src_tokenizer_path, revision=hf_revision)
+        tgt_tokenizer_path = hf_hub_download(repo_id=hf_repo_id, filename=tgt_tokenizer_path, revision=hf_revision)
+        return model_cache_path, src_tokenizer_path, tgt_tokenizer_path
 
     if checkpoint_path is not None:
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
     raise ValueError("Provide either a local checkpoint_path or a Hugging Face repo reference")
 
-def load_model(model_path: str):
+def load_model_from_source(
+    checkpoint_path: str | None = None,
+    src_tokenizer_path: str  = "tokenizers/bpe_tokenizer_opus_en.json", # for now, keep it as tokenizer/bpe_tokenizer_opus_en.json
+    tgt_tokenizer_path: str  = "tokenizers/bpe_tokenizer_opus_fr.json", # for now, keep it as tokenizer/bpe_tokenizer_opus_fr.json
+    hf_repo_id: str | None = None,
+    hf_filename: str | None = None,
+    hf_revision: str | None = None,
+):
+    model_path, src_tokenizer_path, tgt_tokenizer_path = _resolve_checkpoint_path(
+        checkpoint_path=checkpoint_path,
+        src_tokenizer_path=src_tokenizer_path,
+        tgt_tokenizer_path=tgt_tokenizer_path,
+        hf_repo_id=hf_repo_id,
+        hf_filename=hf_filename,
+        hf_revision=hf_revision,
+    )
+    model, config = load_model(model_path, src_tokenizer_path, tgt_tokenizer_path)
+    return (model, config, src_tokenizer_path, tgt_tokenizer_path)
+
+def load_model(model_path: str, 
+               src_tokenizer_path: str = "tokenizers/bpe_tokenizer_opus_en.json",
+               tgt_tokenizer_path: str = "tokenizers/bpe_tokenizer_opus_fr.json"):
     ckpoint = torch.load(model_path, map_location=torch.device('cpu'))
+    
+    print(f"tokenizer path: {src_tokenizer_path}, {tgt_tokenizer_path}")
     
     config = ckpoint['config']
     SEQ_LEN = config['model']['seq_len']
@@ -47,7 +68,8 @@ def load_model(model_path: str):
     NUM_HEADS = config['model']['num_heads']
     VOCAB_SIZE = config['model']['vocab_size']
     NUM_LAYERS = config['model']['num_layers']
-    en_tokenizer = get_tokenizer(lang="en", tokenizer_path=config['data']['src_tokenizer_path'])
+    en_tokenizer = get_tokenizer(lang="en", tokenizer_path=src_tokenizer_path)
+    fr_tokenizer = get_tokenizer(lang="fr", tokenizer_path=tgt_tokenizer_path)
 
     model = Transformer(VOCAB_SIZE, VOCAB_SIZE, 
                         SEQ_LEN, SEQ_LEN, en_tokenizer.token_to_id("[PAD]"),
@@ -56,21 +78,6 @@ def load_model(model_path: str):
     model.load_state_dict(ckpoint['model_state_dict'])
     
     return model, config
-
-
-def load_model_from_source(
-    checkpoint_path: str | None = None,
-    hf_repo_id: str | None = None,
-    hf_filename: str | None = None,
-    hf_revision: str | None = None,
-):
-    resolved_path = _resolve_checkpoint_path(
-        checkpoint_path=checkpoint_path,
-        hf_repo_id=hf_repo_id,
-        hf_filename=hf_filename,
-        hf_revision=hf_revision,
-    )
-    return load_model(resolved_path)
 
 def tokenize_user_input(user_input:str, tokenizer:Tokenizer, seq_len:int):
     ids = tokenizer.encode(user_input).ids
@@ -88,12 +95,18 @@ def generate_target(
     model: Transformer,
     config,
     n_examples: int,
+    src_tokenizer_path: str = "tokenizers/bpe_tokenizer_opus_en.json",
+    tgt_tokenizer_path: str = "tokenizers/bpe_tokenizer_opus_fr.json",
     user_exs: str = None,
     decoding_method: str = "greedy",
     beam_width: int = 3,
 ) -> List[str]:
-    en_tokenizer = get_tokenizer(lang="en", tokenizer_path=config['data']['src_tokenizer_path'])
-    fr_tokenizer = get_tokenizer(lang="fr", tokenizer_path=config['data']['tgt_tokenizer_path'])
+    
+    print(f"Generating target sentences with decoding method: {decoding_method}, beam_width: {beam_width}, user_exs: {user_exs}")
+    print(f"src_tokenizer_path: {src_tokenizer_path}, tgt_tokenizer_path: {tgt_tokenizer_path}")
+    
+    en_tokenizer = get_tokenizer(lang="en", tokenizer_path=src_tokenizer_path)
+    fr_tokenizer = get_tokenizer(lang="fr", tokenizer_path=tgt_tokenizer_path)
     sos_id = fr_tokenizer.token_to_id("[SOS]")
     eos_id = fr_tokenizer.token_to_id("[EOS]")
     tgt_sentence = []
@@ -104,8 +117,8 @@ def generate_target(
             config['model']['seq_len'],
             n_examples,
             config['model']['vocab_size'],
-            config['data']['src_tokenizer_path'], 
-            config['data']['tgt_tokenizer_path'],
+            src_tokenizer_path, 
+            tgt_tokenizer_path,
             config['data']['test_size']
         ) 
         for item in val_dl:
