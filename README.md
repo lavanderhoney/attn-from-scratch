@@ -122,6 +122,19 @@ The inference script loads a checkpoint, reconstructs the model from the saved c
 
 The repository also contains a small FastAPI app in [backend/main.py](backend/main.py) intended as a minimal generation demo. It is useful as a starting point for turning the model into a service, but it is not production-hardened.
 
+To load the checkpoint from Hugging Face instead of a local file, set these environment variables before starting the backend:
+
+```bash
+export CHECKPOINT_REPO_ID="your-username/your-model-repo"
+export CHECKPOINT_FILENAME="transformer_noam_v2_epoch_30.pt"
+# optional
+export CHECKPOINT_REVISION="main"
+```
+
+If you still want to use a local checkpoint, set `CHECKPOINT_PATH` instead. The backend will prefer the local path when it exists.
+
+For local development, you can put those variables in a repo-root `.env` file and start the backend normally. The app loads that file on startup.
+
 ## Requirements
 
 The codebase targets Python 3.10+ and uses the following core libraries:
@@ -141,6 +154,7 @@ Install the dependencies with pip:
 python -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
+pip install -e .
 pip install torch datasets tokenizers pyyaml tqdm tensorboard fastapi uvicorn
 ```
 
@@ -156,6 +170,7 @@ cd attn-from-scratch
 python -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
+pip install -e .
 pip install torch datasets tokenizers pyyaml tqdm tensorboard fastapi uvicorn
 ```
 

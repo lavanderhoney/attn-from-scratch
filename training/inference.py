@@ -6,6 +6,36 @@ from training.dataset import get_dataloaders, get_tokenizer
 from typing import List
 from tokenizers import Tokenizer
 import argparse
+from pathlib import Path
+
+try:
+    from huggingface_hub import hf_hub_download
+except Exception:  # pragma: no cover
+    hf_hub_download = None
+    
+def _resolve_checkpoint_path(
+    checkpoint_path: str | None = None,
+    hf_repo_id: str | None = None,
+    hf_filename: str | None = None,
+    hf_revision: str | None = None,
+) -> str:
+    if checkpoint_path is not None and Path(checkpoint_path).exists():
+        return str(checkpoint_path)
+
+    if hf_repo_id:
+        if hf_hub_download is None:
+            raise ImportError(
+                "huggingface_hub is required to load checkpoints from a Hugging Face repo. "
+                "Install it with: pip install huggingface_hub"
+            )
+        if not hf_filename:
+            raise ValueError("hf_filename is required when loading from a Hugging Face repo")
+        return hf_hub_download(repo_id=hf_repo_id, filename=hf_filename, revision=hf_revision)
+
+    if checkpoint_path is not None:
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+    raise ValueError("Provide either a local checkpoint_path or a Hugging Face repo reference")
 
 def load_model(model_path: str):
     ckpoint = torch.load(model_path, map_location=torch.device('cpu'))
@@ -27,6 +57,21 @@ def load_model(model_path: str):
     
     return model, config
 
+
+def load_model_from_source(
+    checkpoint_path: str | None = None,
+    hf_repo_id: str | None = None,
+    hf_filename: str | None = None,
+    hf_revision: str | None = None,
+):
+    resolved_path = _resolve_checkpoint_path(
+        checkpoint_path=checkpoint_path,
+        hf_repo_id=hf_repo_id,
+        hf_filename=hf_filename,
+        hf_revision=hf_revision,
+    )
+    return load_model(resolved_path)
+
 def tokenize_user_input(user_input:str, tokenizer:Tokenizer, seq_len:int):
     ids = tokenizer.encode(user_input).ids
     ids = ids[:seq_len-2] # account for SOS and EOS
@@ -39,7 +84,14 @@ def tokenize_user_input(user_input:str, tokenizer:Tokenizer, seq_len:int):
     ids_tensor = torch.tensor(ids, dtype=torch.long).unsqueeze(0) # (
     return ids_tensor
 
-def generate_target(model: Transformer, config, n_examples:int, user_exs:str=None) -> List[str]:
+def generate_target(
+    model: Transformer,
+    config,
+    n_examples: int,
+    user_exs: str = None,
+    decoding_method: str = "greedy",
+    beam_width: int = 3,
+) -> List[str]:
     en_tokenizer = get_tokenizer(lang="en", tokenizer_path=config['data']['src_tokenizer_path'])
     fr_tokenizer = get_tokenizer(lang="fr", tokenizer_path=config['data']['tgt_tokenizer_path'])
     sos_id = fr_tokenizer.token_to_id("[SOS]")
@@ -62,27 +114,34 @@ def generate_target(model: Transformer, config, n_examples:int, user_exs:str=Non
             break
     else:
         examples = tokenize_user_input(user_exs, en_tokenizer, config['model']['seq_len'])
-        
+
+    if decoding_method not in {"greedy", "beam"}:
+        raise ValueError(f"Unsupported decoding method: {decoding_method}")
+
+    decode_examples = examples if decoding_method == "greedy" else examples[:1] # beam-search supports single sentence only, not batch
+
     model.eval()
     with torch.no_grad():
-        gen_ids_gr = model.greedy_decode(examples, sos_id, eos_id).detach().cpu().tolist()
-        gen_ids_beam = model.beam_search_decode(examples[0,:].unsqueeze(0), sos_id, eos_id, 3).detach().cpu().tolist()
-    gen_sentences_gr = fr_tokenizer.decode_batch(gen_ids_gr)
-    gen_sentences_beam = fr_tokenizer.decode_batch(gen_ids_beam)
+        if decoding_method == "greedy":
+            gen_ids = model.greedy_decode(decode_examples, sos_id, eos_id).detach().cpu().tolist()
+        else:
+            gen_ids = model.beam_search_decode(decode_examples, sos_id, eos_id, beam_width).detach().cpu().tolist()
+
+    gen_sentences = fr_tokenizer.decode_batch(gen_ids)
 
     src_sentence = en_tokenizer.decode_batch(examples.tolist())
     print(f"\n##################### ENGLISH SETNECE  #####################")
     print(src_sentence[0])
     
-    print(f"\n##################### GREEDY DECODING  #####################")
-    print(gen_sentences_gr[0])
-    print(f"\n##################### BEAM SEARCH DECODING  #####################")
-    print(gen_sentences_beam[0])
+    print(f"\n##################### {decoding_method.upper()} DECODING  #####################")
+    print(gen_sentences[0])
 
     if tgt_sentence:
         print(f"\n##################### TARGET SENTENCE  #####################")
         tgt_sentence = fr_tokenizer.decode_batch(tgt_sentence)
         print(tgt_sentence[0])
+
+    return gen_sentences
 
 if __name__ == "__main__":
     
@@ -94,5 +153,5 @@ if __name__ == "__main__":
     
     # ckpoint_path = args.model_path
     ckpoint_path = "/teamspace/studios/this_studio/attn-from-scratch/checkpoints/transformer_noam_v2_epoch_30.pt"
-    model, config = load_model(ckpoint_path)
+    model, config = load_model_from_source(checkpoint_path=ckpoint_path)
     generate_target(model, config, 1, user_exs=None)

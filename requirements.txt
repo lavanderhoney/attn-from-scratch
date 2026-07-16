@@ -1,0 +1,12 @@
+torch
+datasets
+tokenizers
+PyYAML
+tqdm
+tensorboard
+fastapi
+uvicorn
+pydantic
+huggingface_hub
+numpy
+python-dotenv
